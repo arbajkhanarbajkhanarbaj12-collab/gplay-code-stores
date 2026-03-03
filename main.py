@@ -17,8 +17,8 @@ pending_payments = {}
 def main_menu(uid):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("🛒 Buy Code", callback_data="buy"))
-    markup.add(InlineKeyboardButton("💰 My Points", callback_data="points"))
     markup.add(InlineKeyboardButton("💳 Buy Points", callback_data="buy_points"))
+    markup.add(InlineKeyboardButton("💰 My Points", callback_data="points"))
     markup.add(InlineKeyboardButton("🎁 Redeem Code", callback_data="redeem"))
 
     if uid == ADMIN_ID:
@@ -31,14 +31,17 @@ def start(message):
     uid = message.chat.id
     if uid not in users:
         users[uid] = {"points": 0}
-    bot.send_message(uid,
-                     "🎉 Welcome To Google Play Code Store\n\nSelect an option 👇",
-                     reply_markup=main_menu(uid))
+    bot.send_message(
+        uid,
+        "🎉 Welcome To Google Play Code Store\n\nSelect an option 👇",
+        reply_markup=main_menu(uid)
+    )
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback(call):
     uid = call.message.chat.id
 
+    # BUY MENU
     if call.data == "buy":
         markup = InlineKeyboardMarkup()
         for amount in stock:
@@ -50,6 +53,15 @@ def callback(call):
             )
         bot.edit_message_text("Select Amount:", uid, call.message.message_id, reply_markup=markup)
 
+    # BUY POINTS (FIXED POSITION)
+    elif call.data == "buy_points":
+        bot.send_message(
+            uid,
+            "📸 Send Payment Screenshot After Paying\n\n(Replace this text with your QR or UPI ID)"
+        )
+        pending_payments[uid] = True
+
+    # BUY CODE
     elif call.data.startswith("buy_"):
         amount = int(call.data.split("_")[1])
 
@@ -63,28 +75,25 @@ def callback(call):
 
         code = stock[amount].pop(0)
         users[uid]["points"] -= amount
-        bot.send_message(uid, f"✅ Your Code:\n{code}")
+        bot.send_message(uid, f"✅ Your Google Play Code:\n{code}")
 
     elif call.data == "points":
         bot.answer_callback_query(call.id)
         bot.send_message(uid, f"💰 Your Points: {users[uid]['points']}")
-
-    elif call.data == "buy_points":
-        bot.send_message(uid,
-                         "📸 Send Payment Screenshot After Paying\n\n(Your QR Here)")
-        pending_payments[uid] = True
 
     elif call.data == "redeem":
         msg = bot.send_message(uid, "Enter redeem code:")
         bot.register_next_step_handler(msg, process_redeem)
 
     elif call.data == "admin" and uid == ADMIN_ID:
-        bot.send_message(uid,
-                         "Admin Commands:\n"
-                         "/addcode 10 CODE\n"
-                         "/stock\n"
-                         "/genredeem 400\n"
-                         "/approve USER_ID AMOUNT")
+        bot.send_message(
+            uid,
+            "Admin Commands:\n"
+            "/addcode 10 CODE\n"
+            "/stock\n"
+            "/genredeem 400\n"
+            "/approve USER_ID AMOUNT"
+        )
 
 def process_redeem(message):
     uid = message.chat.id
@@ -102,8 +111,11 @@ def handle_payment(message):
     uid = message.chat.id
 
     if uid in pending_payments:
-        bot.send_message(ADMIN_ID,
-                         f"💳 Payment Screenshot from {uid}\n\nApprove using:\n/approve {uid} AMOUNT")
+        bot.send_photo(
+            ADMIN_ID,
+            message.photo[-1].file_id,
+            caption=f"💳 Payment Screenshot from {uid}\n\nApprove using:\n/approve {uid} AMOUNT"
+        )
         bot.send_message(uid, "⏳ Waiting for admin approval")
         del pending_payments[uid]
 
@@ -133,6 +145,8 @@ def addcode(message):
     try:
         _, amount, code = message.text.split()
         amount = int(amount)
+        if amount not in stock:
+            stock[amount] = []
         stock[amount].append(code)
         bot.send_message(message.chat.id, "✅ Code Added")
     except:
@@ -156,8 +170,10 @@ def generate_redeem(message):
         amount = int(amount)
         code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
         redeem_codes[code] = amount
-        bot.send_message(message.chat.id,
-                         f"🎁 Redeem Code:\n{code}\nAmount: {amount}")
+        bot.send_message(
+            message.chat.id,
+            f"🎁 Redeem Code:\n{code}\nAmount: {amount}"
+        )
     except:
         bot.send_message(message.chat.id, "Use:\n/genredeem 400")
 
