@@ -92,12 +92,18 @@ def start(message):
 @bot.callback_query_handler(func=lambda call: True)
 def callback(call):
     uid = call.message.chat.id
+
+    # Buy Points → ask user how many points
     if call.data == "buy_points":
         msg = bot.send_message(uid, "💰 Enter how many points you want to buy (1 point = ₹1):")
         bot.register_next_step_handler(msg, process_points_amount)
+
+    # Check balance
     elif call.data == "points":
         pts = get_points(uid)
         bot.send_message(uid, f"💰 Your Points: {pts}")
+
+    # Daily bonus
     elif call.data == "daily":
         now = int(time.time())
         c.execute("SELECT last_claim FROM daily_claims WHERE user_id=?", (uid,))
@@ -113,8 +119,17 @@ def callback(call):
                 c.execute("INSERT INTO daily_claims(user_id,last_claim) VALUES(?,?)",(uid,now))
             conn.commit()
             bot.send_message(uid,f"✅ Daily bonus {bonus} points added!")
+
+    # Admin panel
     elif call.data == "admin" and uid == ADMIN_ID:
         bot.send_message(uid,"Admin commands:\n/approve USER_ID POINTS\n/reject USER_ID\n/transactions")
+
+    # Deposit button → start UTR flow
+    elif call.data == "deposit_button":
+        if uid in pending_payments:
+            bot.send_message(uid,"Step 1️⃣: Enter UTR / Transaction ID:")
+        else:
+            bot.send_message(uid,"❌ No pending payment. Please enter points first.")
 
 # ----------------- PROCESS POINTS INPUT -----------------
 def process_points_amount(message):
