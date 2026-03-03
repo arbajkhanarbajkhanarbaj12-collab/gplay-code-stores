@@ -40,7 +40,8 @@ c.execute('''CREATE TABLE IF NOT EXISTS payments (
     amount INTEGER,
     screenshot TEXT,
     utr TEXT,
-    approved INTEGER DEFAULT 0
+    status TEXT DEFAULT 'pending',
+    request_id TEXT
 )''')
 
 # Transactions table
@@ -79,7 +80,7 @@ def main_menu(uid):
         markup.add(InlineKeyboardButton("⚙ Admin Panel", callback_data="admin"))
     return markup
 
-# ----------------- UTIL FUNCTIONS -----------------
+# ----------------- UTILS -----------------
 def get_points(uid):
     c.execute("SELECT points FROM users WHERE id=?", (uid,))
     row = c.fetchone()
@@ -94,134 +95,64 @@ def add_transaction(uid, t_type, amount, code=None):
     c.execute("INSERT INTO transactions(user_id,type,amount,code) VALUES(?,?,?,?)", (uid,t_type,amount,code))
     conn.commit()
 
-# ----------------- HANDLERS -----------------
+# ----------------- PENDING PAYMENTS -----------------
+pending_payments = {}  # uid: {"amount": None, "screenshot": None, "utr": None, "request_id": None}
+
+def generate_request_id():
+    return "R" + ''.join(random.choices(string.digits, k=20))
+
+# ----------------- START -----------------
 @bot.message_handler(commands=['start'])
 def start(message):
     uid = message.chat.id
     get_points(uid)
-    bot.send_message(uid, "🎉 Welcome To World-Class GPlay Code Store\n\nSelect an option 👇",
+    bot.send_message(uid, f"🎉 Welcome To World-Class GPlay Code Store (@Buyredeem_bot)\n\nSelect an option 👇",
                      reply_markup=main_menu(uid))
 
 # ----------------- CALLBACK HANDLER -----------------
-pending_payments = {}  # uid: {"screenshot": None, "utr": None}
-
 @bot.callback_query_handler(func=lambda call: True)
 def callback(call):
     uid = call.message.chat.id
 
-    if call.data == "buy":
+    if call.data == "buy_points":
         markup = InlineKeyboardMarkup()
-        for amount in range(10, 301, 5):
-            c.execute("SELECT COUNT(*) FROM stock WHERE amount=?", (amount,))
-            stock_count = c.fetchone()[0]
-            markup.add(InlineKeyboardButton(f"₹{amount} (Stock {stock_count})", callback_data=f"buy_{amount}"))
-        bot.edit_message_text("Select Amount:", uid, call.message.message_id, reply_markup=markup)
-
-    elif call.data == "buy_points":
-        bot.send_message(uid, "💳 Send Payment Screenshot & UTR Number\n\nExample:\n1️⃣ Screenshot\n2️⃣ UTR Number")
-        pending_payments[uid] = {"screenshot": None, "utr": None}
-
-    elif call.data.startswith("buy_"):
-        amount = int(call.data.split("_")[1])
-        points = get_points(uid)
-        c.execute("SELECT code FROM stock WHERE amount=? LIMIT 1", (amount,))
-        row = c.fetchone()
-        if points < amount:
-            bot.answer_callback_query(call.id, "❌ Not enough points")
-            return
-        if not row:
-            bot.answer_callback_query(call.id, "❌ Out of stock")
-            return
-        code = row[0]
-        c.execute("DELETE FROM stock WHERE code=? AND amount=?", (code, amount))
-        c.execute("UPDATE users SET points=points-? WHERE id=?", (amount, uid))
-        conn.commit()
-        bot.send_message(uid, f"✅ Your Code:\n{code}")
-        add_transaction(uid, "buy", amount, code)
-
-    elif call.data == "points":
-        bot.answer_callback_query(call.id)
-        pts = get_points(uid)
-        bot.send_message(uid, f"💰 Your Points: {pts}")
-
-    elif call.data == "redeem":
-        msg = bot.send_message(uid, "Enter redeem code:")
-        bot.register_next_step_handler(msg, process_redeem)
-
-    elif call.data == "leaderboard":
-        c.execute("SELECT id, points FROM users ORDER BY points DESC LIMIT 10")
-        rows = c.fetchall()
-        msg = "🏆 Leaderboard:\n"
-        for i, r in enumerate(rows, 1):
-            msg += f"{i}. User:{r[0]} - {r[1]} Points\n"
-        bot.send_message(uid,msg)
-
+        markup.add(InlineKeyboardButton("💳 Deposited ✅", callback_data="deposit_button"))
+        bot.send_message(uid, "💰 UPI Payment Details\n\nAmount: ₹700\nUPI ID: redeemcode@ybl\n\nInstructions:\n1️⃣ Scan QR code OR send ₹700 to above UPI\n2️⃣ After payment, click Deposited ✅ button\n3️⃣ Follow the steps to submit proof",
+                         reply_markup=markup)
+    elif call.data == "deposit_button":
+        amount = 700
+        req_id = generate_request_id()
+        pending_payments[uid] = {"amount": amount, "screenshot": None, "utr": None, "request_id": req_id}
+        bot.send_message(uid, "Step 1️⃣: Enter UTR / Transaction ID:")
     elif call.data == "referral":
-        link = f"https://t.me/YourBotUsername?start={uid}"
+        link = f"https://t.me/@Buyredeem_bot?start={uid}"
         bot.send_message(uid,f"🎯 Invite friends using this link:\n{link}\nEarn bonus points when they join!")
 
-    elif call.data == "daily":
-        now = int(time.time())
-        c.execute("SELECT last_claim FROM daily_claims WHERE user_id=?", (uid,))
-        row = c.fetchone()
-        if row and now - row[0] < 86400:
-            bot.send_message(uid,"❌ You already claimed daily bonus today.")
-        else:
-            bonus = 50
-            c.execute("UPDATE users SET points=points+? WHERE id=?", (bonus,uid))
-            if row:
-                c.execute("UPDATE daily_claims SET last_claim=? WHERE user_id=?", (now,uid))
-            else:
-                c.execute("INSERT INTO daily_claims(user_id,last_claim) VALUES(?,?)",(uid,now))
-            conn.commit()
-            bot.send_message(uid,f"✅ Daily bonus {bonus} points added!")
-
-    elif call.data == "admin" and uid == ADMIN_ID:
-        bot.send_message(uid,
-            "Admin Commands:\n"
-            "/addcode 10 CODE\n"
-            "/stock\n"
-            "/genredeem 400\n"
-            "/approve USER_ID AMOUNT\n"
-            "/reject USER_ID\n"
-            "/transactions")
-
-# ----------------- REDEEM -----------------
-def process_redeem(message):
+# ----------------- HANDLE UTR -----------------
+@bot.message_handler(func=lambda m: True)
+def handle_message(message):
     uid = message.chat.id
-    code = message.text.strip()
-    c.execute("SELECT amount FROM redeem_codes WHERE code=?", (code,))
-    row = c.fetchone()
-    if row:
-        amount = row[0]
-        c.execute("DELETE FROM redeem_codes WHERE code=?", (code,))
-        c.execute("UPDATE users SET points=points+? WHERE id=?", (amount, uid))
-        conn.commit()
-        bot.send_message(uid, f"✅ {amount} Points Added via Redeem")
-        add_transaction(uid, "redeem", amount, code)
+    if uid in pending_payments and pending_payments[uid]["utr"] is None:
+        pending_payments[uid]["utr"] = message.text.strip()
+        bot.send_message(uid, "✅ UTR Received!\n\nStep 2️⃣: Send Screenshot of Payment (make sure it shows amount, date, UTR)")
+    elif uid in pending_payments and pending_payments[uid]["utr"] and pending_payments[uid]["screenshot"] is None:
+        bot.send_message(uid, "📸 Please send payment screenshot from your bank app.")
     else:
-        bot.send_message(uid, "❌ Invalid Redeem Code")
+        pass
 
 # ----------------- PHOTO HANDLER -----------------
 @bot.message_handler(content_types=['photo'])
-def handle_payment(message):
+def handle_photo(message):
     uid = message.chat.id
-    if uid in pending_payments:
+    if uid in pending_payments and pending_payments[uid]["utr"] and pending_payments[uid]["screenshot"] is None:
         pending_payments[uid]["screenshot"] = message.photo[-1].file_id
-        bot.send_message(uid, "✅ Screenshot received. Now send your UTR / Transaction ID.")
-
-# ----------------- TEXT HANDLER FOR UTR -----------------
-@bot.message_handler(func=lambda m: True)
-def handle_utr(message):
-    uid = message.chat.id
-    if uid in pending_payments and pending_payments[uid]["screenshot"] and not pending_payments[uid]["utr"]:
-        pending_payments[uid]["utr"] = message.text.strip()
-        bot.send_photo(
-            ADMIN_ID,
-            pending_payments[uid]["screenshot"],
-            caption=f"💳 Payment from {uid}\nUTR: {pending_payments[uid]['utr']}\nApprove using:\n/approve {uid} AMOUNT\nReject using:\n/reject {uid}"
-        )
-        bot.send_message(uid, "⏳ Waiting for admin approval")
+        info = pending_payments[uid]
+        c.execute("INSERT INTO payments(user_id,amount,screenshot,utr,request_id) VALUES(?,?,?,?,?)",
+                  (uid, info["amount"], info["screenshot"], info["utr"], info["request_id"]))
+        conn.commit()
+        bot.send_message(uid, f"✅ Payment Proof Submitted Successfully!\n\n💰 Amount: ₹{info['amount']}\n🔢 UTR: {info['utr']}\n📸 Screenshot: ✅ Received\n⏳ Status: Admin verification pending\n🆔 Request ID: `{info['request_id']}`", parse_mode="Markdown")
+        bot.send_photo(ADMIN_ID, info["screenshot"],
+                       caption=f"💳 Payment from {uid}\nAmount: ₹{info['amount']}\nUTR: {info['utr']}\nRequest ID: {info['request_id']}\nApprove: /approve {uid} {info['amount']}\nReject: /reject {uid}")
         del pending_payments[uid]
 
 # ----------------- ADMIN COMMANDS -----------------
@@ -233,16 +164,14 @@ def approve_payment(message):
         _, user_id, amount = message.text.split()
         user_id = int(user_id)
         amount = int(amount)
-        c.execute("SELECT points FROM users WHERE id=?", (user_id,))
-        if not c.fetchone():
-            c.execute("INSERT INTO users(id, points) VALUES(?,0)", (user_id,))
         c.execute("UPDATE users SET points=points+? WHERE id=?", (amount, user_id))
-        add_transaction(user_id, "buy_points", amount, None)
+        c.execute("UPDATE payments SET status='approved' WHERE user_id=? AND amount=? AND status='pending'", (user_id, amount))
+        add_transaction(user_id, "buy_points", amount)
         conn.commit()
         bot.send_message(user_id, f"✅ {amount} Points Approved & Added")
         bot.send_message(message.chat.id, "✅ Payment Approved")
     except:
-        bot.send_message(message.chat.id, "Use:\n/approve USER_ID AMOUNT")
+        bot.send_message(message.chat.id, "Use: /approve USER_ID AMOUNT")
 
 @bot.message_handler(commands=['reject'])
 def reject_payment(message):
@@ -251,59 +180,12 @@ def reject_payment(message):
     try:
         _, user_id = message.text.split()
         user_id = int(user_id)
+        c.execute("UPDATE payments SET status='rejected' WHERE user_id=? AND status='pending'", (user_id,))
+        conn.commit()
         bot.send_message(user_id,"❌ Your payment was rejected by admin.")
         bot.send_message(message.chat.id,"✅ Payment Rejected")
     except:
-        bot.send_message(message.chat.id, "Use:\n/reject USER_ID")
-
-@bot.message_handler(commands=['addcode'])
-def addcode(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    try:
-        _, amount, code = message.text.split()
-        amount = int(amount)
-        c.execute("INSERT INTO stock(amount,code) VALUES(?,?)",(amount,code))
-        conn.commit()
-        bot.send_message(message.chat.id, "✅ Code Added")
-    except:
-        bot.send_message(message.chat.id, "Use:\n/addcode 10 ABCD-1234")
-
-@bot.message_handler(commands=['stock'])
-def stock_check(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    msg = "📦 Stock Status:\n"
-    for amount in range(10, 301, 5):
-        c.execute("SELECT COUNT(*) FROM stock WHERE amount=?", (amount,))
-        count = c.fetchone()[0]
-        msg += f"₹{amount} = {count}\n"
-    bot.send_message(message.chat.id, msg)
-
-@bot.message_handler(commands=['genredeem'])
-def generate_redeem(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    try:
-        _, amount = message.text.split()
-        amount = int(amount)
-        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-        c.execute("INSERT INTO redeem_codes(code,amount) VALUES(?,?)",(code,amount))
-        conn.commit()
-        bot.send_message(message.chat.id,f"🎁 Redeem Code:\n{code}\nAmount: {amount}")
-    except:
-        bot.send_message(message.chat.id, "Use:\n/genredeem 400")
-
-@bot.message_handler(commands=['transactions'])
-def transactions(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    c.execute("SELECT user_id,type,amount,code FROM transactions ORDER BY rowid DESC LIMIT 20")
-    rows = c.fetchall()
-    msg = "📜 Last 20 Transactions:\n"
-    for r in rows:
-        msg += f"User:{r[0]} | {r[1]} | {r[2]} | {r[3]}\n"
-    bot.send_message(message.chat.id,msg)
+        bot.send_message(message.chat.id, "Use: /reject USER_ID")
 
 # ----------------- RUN BOT -----------------
 bot.infinity_polling()
