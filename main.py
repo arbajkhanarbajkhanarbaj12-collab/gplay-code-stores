@@ -22,21 +22,10 @@ c.execute('''CREATE TABLE IF NOT EXISTS users (
     points INTEGER DEFAULT 0
 )''')
 
-# Stock table
-c.execute('''CREATE TABLE IF NOT EXISTS stock (
-    amount INTEGER,
-    code TEXT
-)''')
-
-# Redeem codes table
-c.execute('''CREATE TABLE IF NOT EXISTS redeem_codes (
-    code TEXT,
-    amount INTEGER
-)''')
-
 # Payments table
 c.execute('''CREATE TABLE IF NOT EXISTS payments (
     user_id INTEGER,
+    points INTEGER,
     amount INTEGER,
     screenshot TEXT,
     utr TEXT,
@@ -48,14 +37,8 @@ c.execute('''CREATE TABLE IF NOT EXISTS payments (
 c.execute('''CREATE TABLE IF NOT EXISTS transactions (
     user_id INTEGER,
     type TEXT,
-    amount INTEGER,
+    points INTEGER,
     code TEXT
-)''')
-
-# Referral table
-c.execute('''CREATE TABLE IF NOT EXISTS referrals (
-    referrer_id INTEGER,
-    referred_id INTEGER
 )''')
 
 # Daily claims
@@ -65,20 +48,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS daily_claims (
 )''')
 
 conn.commit()
-
-# ----------------- MAIN MENU -----------------
-def main_menu(uid):
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🛒 Buy Code", callback_data="buy"))
-    markup.add(InlineKeyboardButton("💳 Buy Points", callback_data="buy_points"))
-    markup.add(InlineKeyboardButton("💰 My Points", callback_data="points"))
-    markup.add(InlineKeyboardButton("🎁 Redeem Code", callback_data="redeem"))
-    markup.add(InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard"))
-    markup.add(InlineKeyboardButton("🎯 Referral", callback_data="referral"))
-    markup.add(InlineKeyboardButton("📅 Daily Bonus", callback_data="daily"))
-    if uid == ADMIN_ID:
-        markup.add(InlineKeyboardButton("⚙ Admin Panel", callback_data="admin"))
-    return markup
 
 # ----------------- UTILS -----------------
 def get_points(uid):
@@ -91,68 +60,109 @@ def get_points(uid):
         conn.commit()
         return 0
 
-def add_transaction(uid, t_type, amount, code=None):
-    c.execute("INSERT INTO transactions(user_id,type,amount,code) VALUES(?,?,?,?)", (uid,t_type,amount,code))
+def add_transaction(uid, t_type, points, code=None):
+    c.execute("INSERT INTO transactions(user_id,type,points,code) VALUES(?,?,?,?)", (uid,t_type,points,code))
     conn.commit()
-
-# ----------------- PENDING PAYMENTS -----------------
-pending_payments = {}  # uid: {"amount": None, "screenshot": None, "utr": None, "request_id": None}
 
 def generate_request_id():
     return "R" + ''.join(random.choices(string.digits, k=20))
+
+# ----------------- MAIN MENU -----------------
+def main_menu(uid):
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("💳 Buy Points", callback_data="buy_points"))
+    markup.add(InlineKeyboardButton("💰 My Points", callback_data="points"))
+    markup.add(InlineKeyboardButton("📅 Daily Bonus", callback_data="daily"))
+    if uid == ADMIN_ID:
+        markup.add(InlineKeyboardButton("⚙ Admin Panel", callback_data="admin"))
+    return markup
+
+# ----------------- PENDING PAYMENTS -----------------
+pending_payments = {}  # uid: {"points":None,"amount":None,"screenshot":None,"utr":None,"request_id":None}
 
 # ----------------- START -----------------
 @bot.message_handler(commands=['start'])
 def start(message):
     uid = message.chat.id
     get_points(uid)
-    bot.send_message(uid, f"🎉 Welcome To World-Class GPlay Code Store (@Buyredeem_bot)\n\nSelect an option 👇",
+    bot.send_message(uid, f"🎉 Welcome To Ultimate Redeem Bot (@Buyredeem_bot)\nSelect an option 👇",
                      reply_markup=main_menu(uid))
 
-# ----------------- CALLBACK HANDLER -----------------
+# ----------------- CALLBACKS -----------------
 @bot.callback_query_handler(func=lambda call: True)
 def callback(call):
     uid = call.message.chat.id
-
     if call.data == "buy_points":
+        msg = bot.send_message(uid, "💰 Enter how many points you want to buy (1 point = ₹1):")
+        bot.register_next_step_handler(msg, process_points_amount)
+    elif call.data == "points":
+        pts = get_points(uid)
+        bot.send_message(uid, f"💰 Your Points: {pts}")
+    elif call.data == "daily":
+        now = int(time.time())
+        c.execute("SELECT last_claim FROM daily_claims WHERE user_id=?", (uid,))
+        row = c.fetchone()
+        if row and now - row[0] < 86400:
+            bot.send_message(uid,"❌ You already claimed daily bonus today.")
+        else:
+            bonus = 50
+            c.execute("UPDATE users SET points=points+? WHERE id=?", (bonus,uid))
+            if row:
+                c.execute("UPDATE daily_claims SET last_claim=? WHERE user_id=?", (now,uid))
+            else:
+                c.execute("INSERT INTO daily_claims(user_id,last_claim) VALUES(?,?)",(uid,now))
+            conn.commit()
+            bot.send_message(uid,f"✅ Daily bonus {bonus} points added!")
+    elif call.data == "admin" and uid == ADMIN_ID:
+        bot.send_message(uid,"Admin commands:\n/approve USER_ID POINTS\n/reject USER_ID\n/transactions")
+
+# ----------------- PROCESS POINTS INPUT -----------------
+def process_points_amount(message):
+    uid = message.chat.id
+    try:
+        points = int(message.text.strip())
+        if points <= 0:
+            bot.send_message(uid,"❌ Enter a valid number of points")
+            return
+        amount = points  # 1 point = ₹1
+        req_id = generate_request_id()
+        pending_payments[uid] = {"points": points, "amount": amount, "screenshot": None, "utr": None, "request_id": req_id}
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("💳 Deposited ✅", callback_data="deposit_button"))
-        bot.send_message(uid, "💰 UPI Payment Details\n\nAmount: ₹700\nUPI ID: redeemcode@ybl\n\nInstructions:\n1️⃣ Scan QR code OR send ₹700 to above UPI\n2️⃣ After payment, click Deposited ✅ button\n3️⃣ Follow the steps to submit proof",
+        bot.send_message(uid,
+                         f"💰 Payment Details\nAmount: ₹{amount}\nUPI ID: redeemcode@ybl\n\nInstructions:\n1️⃣ Scan QR or pay ₹{amount} to above UPI\n2️⃣ Click Deposited ✅ button\n3️⃣ Send UTR & Screenshot",
                          reply_markup=markup)
-    elif call.data == "deposit_button":
-        amount = 700
-        req_id = generate_request_id()
-        pending_payments[uid] = {"amount": amount, "screenshot": None, "utr": None, "request_id": req_id}
-        bot.send_message(uid, "Step 1️⃣: Enter UTR / Transaction ID:")
-    elif call.data == "referral":
-        link = f"https://t.me/@Buyredeem_bot?start={uid}"
-        bot.send_message(uid,f"🎯 Invite friends using this link:\n{link}\nEarn bonus points when they join!")
+    except:
+        bot.send_message(uid,"❌ Enter a valid number")
 
 # ----------------- HANDLE UTR -----------------
 @bot.message_handler(func=lambda m: True)
 def handle_message(message):
     uid = message.chat.id
-    if uid in pending_payments and pending_payments[uid]["utr"] is None:
-        pending_payments[uid]["utr"] = message.text.strip()
-        bot.send_message(uid, "✅ UTR Received!\n\nStep 2️⃣: Send Screenshot of Payment (make sure it shows amount, date, UTR)")
-    elif uid in pending_payments and pending_payments[uid]["utr"] and pending_payments[uid]["screenshot"] is None:
-        bot.send_message(uid, "📸 Please send payment screenshot from your bank app.")
-    else:
-        pass
+    if uid in pending_payments:
+        if pending_payments[uid]["utr"] is None:
+            pending_payments[uid]["utr"] = message.text.strip()
+            bot.send_message(uid,"✅ UTR Received!\nStep 2️⃣: Send Screenshot of Payment (show amount, date, UTR)")
+        elif pending_payments[uid]["screenshot"] is None:
+            bot.send_message(uid,"📸 Please send your payment screenshot")
+        else:
+            pass
 
-# ----------------- PHOTO HANDLER -----------------
+# ----------------- HANDLE SCREENSHOT -----------------
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     uid = message.chat.id
-    if uid in pending_payments and pending_payments[uid]["utr"] and pending_payments[uid]["screenshot"] is None:
+    if uid in pending_payments and pending_payments[uid]["screenshot"] is None and pending_payments[uid]["utr"]:
         pending_payments[uid]["screenshot"] = message.photo[-1].file_id
         info = pending_payments[uid]
-        c.execute("INSERT INTO payments(user_id,amount,screenshot,utr,request_id) VALUES(?,?,?,?,?)",
-                  (uid, info["amount"], info["screenshot"], info["utr"], info["request_id"]))
+        c.execute("INSERT INTO payments(user_id,points,amount,screenshot,utr,request_id) VALUES(?,?,?,?,?,?)",
+                  (uid, info["points"], info["amount"], info["screenshot"], info["utr"], info["request_id"]))
         conn.commit()
-        bot.send_message(uid, f"✅ Payment Proof Submitted Successfully!\n\n💰 Amount: ₹{info['amount']}\n🔢 UTR: {info['utr']}\n📸 Screenshot: ✅ Received\n⏳ Status: Admin verification pending\n🆔 Request ID: `{info['request_id']}`", parse_mode="Markdown")
+        bot.send_message(uid,
+                         f"✅ Payment Proof Submitted!\n💰 Amount: ₹{info['amount']}\nPoints: {info['points']}\n🔢 UTR: {info['utr']}\n📸 Screenshot: ✅ Received\n⏳ Status: Admin verification pending\n🆔 Request ID: `{info['request_id']}`",
+                         parse_mode="Markdown")
         bot.send_photo(ADMIN_ID, info["screenshot"],
-                       caption=f"💳 Payment from {uid}\nAmount: ₹{info['amount']}\nUTR: {info['utr']}\nRequest ID: {info['request_id']}\nApprove: /approve {uid} {info['amount']}\nReject: /reject {uid}")
+                       caption=f"💳 Payment from {uid}\nAmount: ₹{info['amount']}\nPoints: {info['points']}\nUTR: {info['utr']}\nRequest ID: {info['request_id']}\nApprove: /approve {uid} {info['points']}\nReject: /reject {uid}")
         del pending_payments[uid]
 
 # ----------------- ADMIN COMMANDS -----------------
@@ -161,17 +171,17 @@ def approve_payment(message):
     if message.chat.id != ADMIN_ID:
         return
     try:
-        _, user_id, amount = message.text.split()
+        _, user_id, points = message.text.split()
         user_id = int(user_id)
-        amount = int(amount)
-        c.execute("UPDATE users SET points=points+? WHERE id=?", (amount, user_id))
-        c.execute("UPDATE payments SET status='approved' WHERE user_id=? AND amount=? AND status='pending'", (user_id, amount))
-        add_transaction(user_id, "buy_points", amount)
+        points = int(points)
+        c.execute("UPDATE users SET points=points+? WHERE id=?", (points, user_id))
+        c.execute("UPDATE payments SET status='approved' WHERE user_id=? AND points=? AND status='pending'", (user_id, points))
+        add_transaction(user_id,"buy_points",points)
         conn.commit()
-        bot.send_message(user_id, f"✅ {amount} Points Approved & Added")
-        bot.send_message(message.chat.id, "✅ Payment Approved")
+        bot.send_message(user_id,f"✅ {points} Points Approved & Added")
+        bot.send_message(message.chat.id,"✅ Payment Approved")
     except:
-        bot.send_message(message.chat.id, "Use: /approve USER_ID AMOUNT")
+        bot.send_message(message.chat.id,"Use: /approve USER_ID POINTS")
 
 @bot.message_handler(commands=['reject'])
 def reject_payment(message):
@@ -185,7 +195,18 @@ def reject_payment(message):
         bot.send_message(user_id,"❌ Your payment was rejected by admin.")
         bot.send_message(message.chat.id,"✅ Payment Rejected")
     except:
-        bot.send_message(message.chat.id, "Use: /reject USER_ID")
+        bot.send_message(message.chat.id,"Use: /reject USER_ID")
+
+@bot.message_handler(commands=['transactions'])
+def transactions(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    c.execute("SELECT user_id,type,points,code FROM transactions ORDER BY rowid DESC LIMIT 20")
+    rows = c.fetchall()
+    msg = "📜 Last 20 Transactions:\n"
+    for r in rows:
+        msg += f"User:{r[0]} | {r[1]} | {r[2]} | {r[3]}\n"
+    bot.send_message(message.chat.id,msg)
 
 # ----------------- RUN BOT -----------------
 bot.infinity_polling()
